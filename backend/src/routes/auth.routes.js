@@ -1,15 +1,49 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/auth.controller');
-const { authenticate } = require('../middleware/auth.middleware');
+const { 
+  authenticate, 
+  checkRole, 
+  verify2FA, 
+  validateSession, 
+  checkApiKey 
+} = require('../middleware/auth.middleware');
 const { validateRequest } = require('../middleware/validate.middleware');
-const { authLimiter, passwordResetLimiter } = require('../middleware/rateLimit.middleware');
+const { 
+  authLimiter, 
+  passwordResetLimiter, 
+  apiLimiter,
+  adminLimiter,
+  userLimiter 
+} = require('../middleware/rateLimit.middleware');
 const validators = require('../validators/auth.validators');
+const { securityHeaders } = require('../middleware/security.middleware');
+const { logRequest } = require('../middleware/logging.middleware');
+
+/**
+ * @fileoverview Authentication Routes
+ * This file contains all routes related to authentication, user management, 
+ * and access control. Routes are organized by access level and feature.
+ */
+
+// Apply common middleware to all routes
+router.use(securityHeaders);
+router.use(logRequest);
+
+/**
+ * ========================================
+ * PUBLIC ROUTES (NO AUTHENTICATION REQUIRED)
+ * ========================================
+ */
 
 /**
  * @route POST /api/auth/register
  * @desc Register a new user and send email verification
  * @access Public
+ * @middleware 
+ *   - Rate limiting to prevent abuse
+ *   - Input validation for user data
+ *   - Security headers
  */
 router.post(
   '/register',
@@ -22,6 +56,10 @@ router.post(
  * @route POST /api/auth/login
  * @desc Authenticate user and get tokens
  * @access Public
+ * @middleware 
+ *   - Rate limiting to prevent brute force
+ *   - Input validation for credentials
+ *   - IP tracking for suspicious activity
  */
 router.post(
   '/login',
@@ -29,70 +67,69 @@ router.post(
   validateRequest(validators.login),
   authController.login
 );
-
 /**
- * @route POST /api/auth/logout
- * @desc Logout user and invalidate tokens
- * @access Private
+ * @route POST /api/auth/login/2fa
+ * @desc Complete login with 2FA verification
+ * @access Public (but requires first authentication step)
+ * @middleware 
+ *   - Rate limiting to prevent brute force
+ *   - Input validation for 2FA token
  */
 router.post(
-  '/logout',
-  authenticate,
-  authController.logout
+  '/login/2fa',
+  authLimiter,
+  validateRequest(validators.verify2FA),
+  authController.verify2FAAndLogin
 );
 
 /**
- * @route POST /api/auth/refresh-token
+ * @route POST /api/auth/refresh
  * @desc Refresh access token using refresh token
- * @access Public
+ * @access Public (requires valid refresh token)
+ * @middleware 
+ *   - Rate limiting to prevent abuse
+ *   - Cookie verification
  */
 router.post(
-  '/refresh-token',
+  '/refresh',
   authLimiter,
-  validateRequest(validators.refreshToken),
   authController.refreshToken
 );
 
 /**
- * @route POST /api/auth/forgot-password
- * @desc Send password reset email
+ * @route POST /api/auth/password/forgot
+ * @desc Request password reset email
  * @access Public
+ * @middleware 
+ *   - Rate limiting to prevent abuse
+ *   - Input validation for email
  */
 router.post(
-  '/forgot-password',
+  '/password/forgot',
   passwordResetLimiter,
   validateRequest(validators.forgotPassword),
   authController.forgotPassword
 );
 
 /**
- * @route POST /api/auth/reset-password/:token
- * @desc Reset password using token
- * @access Public
+ * @route POST /api/auth/password/reset/:token
+ * @desc Reset password using reset token
+ * @access Public (requires valid reset token)
+ * @middleware 
+ *   - Rate limiting to prevent abuse
+ *   - Input validation for password
  */
 router.post(
-  '/reset-password/:token',
+  '/password/reset/:token',
   passwordResetLimiter,
   validateRequest(validators.resetPassword),
   authController.resetPassword
 );
 
 /**
- * @route PUT /api/auth/change-password
- * @desc Change password (when user is logged in)
- * @access Private
- */
-router.put(
-  '/change-password',
-  authenticate,
-  validateRequest(validators.changePassword),
-  authController.changePassword
-);
-
-/**
  * @route GET /api/auth/verify-email/:token
  * @desc Verify user email with token
- * @access Public
+ * @access Public (requires valid email token)
  */
 router.get(
   '/verify-email/:token',
@@ -100,281 +137,414 @@ router.get(
 );
 
 /**
- * @route POST /api/auth/resend-verification
- * @desc Resend email verification link
- * @access Public
+ * ========================================
+ * PROTECTED ROUTES (AUTHENTICATION REQUIRED)
+ * ========================================
+ */
+
+/**
+ * @route POST /api/auth/logout
+ * @desc Logout user and invalidate tokens
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.post(
-  '/resend-verification',
-  authLimiter,
-  validateRequest(validators.resendVerification),
-  authController.resendVerification
+  '/logout',
+  authenticate,
+  validateSession,
+  authController.logout
 );
 
 /**
+ * ========================================
+ * USER PROFILE ROUTES
+ * ========================================
+ */
+
+/**
  * @route GET /api/auth/profile
- * @desc Get user profile
- * @access Private
+ * @desc Get current user profile
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.get(
   '/profile',
   authenticate,
+  validateSession,
+  userLimiter,
   authController.getProfile
 );
 
 /**
  * @route PUT /api/auth/profile
  * @desc Update user profile
- * @access Private
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Input validation for profile data
  */
 router.put(
   '/profile',
   authenticate,
+  validateSession,
+  userLimiter,
   validateRequest(validators.updateProfile),
   authController.updateProfile
 );
 
 /**
- * @route DELETE /api/auth/profile
- * @desc Delete user account
- * @access Private
+ * @route PUT /api/auth/password/change
+ * @desc Change user password
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Input validation for password
  */
-router.delete(
-  '/profile',
+router.put(
+  '/password/change',
   authenticate,
-  validateRequest(validators.deleteAccount),
-  authController.deleteAccount
+  validateSession,
+  passwordResetLimiter,
+  validateRequest(validators.changePassword),
+  authController.changePassword
 );
 
 /**
- * @route POST /api/auth/setup-2fa
- * @desc Setup two-factor authentication
- * @access Private
+ * ========================================
+ * 2FA MANAGEMENT ROUTES
+ * ========================================
+ */
+
+/**
+ * @route POST /api/auth/2fa/setup
+ * @desc Initialize 2FA setup and return QR code
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.post(
-  '/setup-2fa',
+  '/2fa/setup',
   authenticate,
+  validateSession,
+  userLimiter,
   authController.setup2FA
 );
 
 /**
- * @route POST /api/auth/verify-2fa
- * @desc Verify two-factor authentication
- * @access Private
+ * @route POST /api/auth/2fa/enable
+ * @desc Verify and enable 2FA
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Input validation for 2FA token
  */
 router.post(
-  '/verify-2fa',
+  '/2fa/enable',
   authenticate,
+  validateSession,
+  userLimiter,
   validateRequest(validators.verify2FA),
-  authController.verify2FA
+  authController.enable2FA
 );
 
 /**
- * @route POST /api/auth/disable-2fa
- * @desc Disable two-factor authentication
- * @access Private
+ * @route POST /api/auth/2fa/disable
+ * @desc Disable 2FA
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - 2FA verification
+ *   - Input validation for 2FA token
  */
 router.post(
-  '/disable-2fa',
+  '/2fa/disable',
   authenticate,
-  validateRequest(validators.disable2FA),
+  validateSession,
+  verify2FA,
+  validateRequest(validators.verify2FA),
   authController.disable2FA
 );
 
 /**
+ * @route GET /api/auth/2fa/backup-codes
+ * @desc Generate new backup codes for 2FA
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - 2FA verification
+ */
+router.get(
+  '/2fa/backup-codes',
+  authenticate,
+  validateSession,
+  verify2FA,
+  userLimiter,
+  authController.generateBackupCodes
+);
+
+/**
+ * ========================================
+ * SESSION MANAGEMENT ROUTES
+ * ========================================
+ */
+
+/**
  * @route GET /api/auth/sessions
- * @desc Get all active sessions
- * @access Private
+ * @desc Get all active sessions for current user
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.get(
   '/sessions',
   authenticate,
+  validateSession,
+  userLimiter,
   authController.getSessions
 );
 
 /**
  * @route DELETE /api/auth/sessions/:sessionId
  * @desc Terminate a specific session
- * @access Private
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.delete(
   '/sessions/:sessionId',
   authenticate,
-  validateRequest(validators.terminateSession),
+  validateSession,
+  userLimiter,
   authController.terminateSession
 );
 
 /**
  * @route DELETE /api/auth/sessions
  * @desc Terminate all sessions except current
- * @access Private
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
 router.delete(
   '/sessions',
   authenticate,
+  validateSession,
+  userLimiter,
   authController.terminateAllSessions
 );
 
-module.exports = router;
-
-const express = require('express');
-const { body } = require('express-validator');
-const authController = require('../controllers/auth.controller');
-const { verifyToken } = require('../middleware/auth.middleware');
-
-const router = express.Router();
-
-// Log auth controller functions
-console.log('Login Function:', authController.login);
-console.log('Register Function:', authController.register);
+/**
+ * ========================================
+ * API ACCESS MANAGEMENT ROUTES
+ * ========================================
+ */
 
 /**
- * @route POST /api/auth/register
- * @desc Register a new user
- * @access Public
+ * @route POST /api/auth/api-keys
+ * @desc Generate a new API key
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - 2FA verification for sensitive operation
+ *   - Input validation for API key details
  */
 router.post(
-  '/register',
-  [
-    body('email').isEmail().withMessage('Please provide a valid email'),
-    body('password')
-      .isLength({ min: 8 })
-      .withMessage('Password must be at least 8 characters long')
-      .matches(/\d/)
-      .withMessage('Password must contain a number')
-      .matches(/[A-Z]/)
-      .withMessage('Password must contain an uppercase letter'),
-    body('firstName').notEmpty().withMessage('First name is required'),
-    body('lastName').notEmpty().withMessage('Last name is required'),
-    body('role').optional().isIn(['client', 'attorney', 'paralegal', 'admin'])
-      .withMessage('Invalid role specified')
-  ],
-  authController.register
+  '/api-keys',
+  authenticate,
+  validateSession,
+  verify2FA,
+  apiLimiter,
+  validateRequest(validators.createApiKey),
+  authController.createApiKey
 );
 
 /**
- * @route POST /api/auth/login
- * @desc Login user and return JWT token
- * @access Public
+ * @route GET /api/auth/api-keys
+ * @desc Get all API keys for current user
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
-router.post(
-  '/login',
-  [
-    body('email').isEmail().withMessage('Please provide a valid email'),
-    body('password').notEmpty().withMessage('Password is required')
-  ],
-  authController.login
+router.get(
+  '/api-keys',
+  authenticate,
+  validateSession,
+  apiLimiter,
+  authController.getApiKeys
 );
 
 /**
- * @route POST /api/auth/logout
- * @desc Logout user / clear cookie if using cookie auth
- * @access Private
+ * @route DELETE /api/auth/api-keys/:keyId
+ * @desc Revoke a specific API key
+ * @access Protected
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
  */
-router.post('/logout', verifyToken, authController.logout);
+router.delete(
+  '/api-keys/:keyId',
+  authenticate,
+  validateSession,
+  apiLimiter,
+  authController.revokeApiKey
+);
 
 /**
- * @route GET /api/auth/profile
- * @desc Get user profile
- * @access Private
+ * ========================================
+ * ADMIN ROUTES (ADMIN ROLE REQUIRED)
+ * ========================================
  */
-router.get('/profile', verifyToken, authController.getProfile);
 
 /**
- * @route PUT /api/auth/profile
- * @desc Update user profile
- * @access Private
+ * @route GET /api/auth/users
+ * @desc Get list of all users (with pagination, filtering)
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - Rate limiting for admin actions
+ */
+router.get(
+  '/users',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  authController.getUsers
+);
+
+/**
+ * @route GET /api/auth/users/:userId
+ * @desc Get specific user details
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ */
+router.get(
+  '/users/:userId',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  authController.getUserById
+);
+
+/**
+ * @route PUT /api/auth/users/:userId
+ * @desc Update user details (admin operation)
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - Input validation for user data
  */
 router.put(
-  '/profile',
-  verifyToken,
-  [
-    body('email').optional().isEmail().withMessage('Please provide a valid email'),
-    body('firstName').optional().notEmpty().withMessage('First name cannot be empty'),
-    body('lastName').optional().notEmpty().withMessage('Last name cannot be empty'),
-    body('phone').optional().isMobilePhone().withMessage('Please provide a valid phone number')
-  ],
-  authController.updateProfile
+  '/users/:userId',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  validateRequest(validators.updateUser),
+  authController.updateUser
 );
 
 /**
- * @route POST /api/auth/forgot-password
- * @desc Request password reset email
- * @access Public
+ * @route POST /api/auth/staff/register
+ * @desc Register a new staff member (admin operation)
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - Input validation for user data
  */
 router.post(
-  '/forgot-password',
-  [
-    body('email').isEmail().withMessage('Please provide a valid email')
-  ],
-  authController.forgotPassword
+  '/staff/register',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  validateRequest(validators.registerStaff),
+  authController.registerStaff
 );
 
 /**
- * @route POST /api/auth/reset-password/:token
- * @desc Reset password with token
- * @access Public
+ * @route PUT /api/auth/users/:userId/status
+ * @desc Change user status (activate/deactivate)
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - Input validation for status change
  */
-router.post(
-  '/reset-password/:token',
-  [
-    body('password')
-      .isLength({ min: 8 })
-      .withMessage('Password must be at least 8 characters long')
-      .matches(/\d/)
-      .withMessage('Password must contain a number')
-      .matches(/[A-Z]/)
-      .withMessage('Password must contain an uppercase letter'),
-    body('confirmPassword').custom((value, { req }) => {
-      if (value !== req.body.password) {
-        throw new Error('Password confirmation does not match password');
-      }
-      return true;
-    })
-  ],
-  authController.resetPassword
+router.put(
+  '/users/:userId/status',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  validateRequest(validators.changeUserStatus),
+  authController.changeUserStatus
 );
 
 /**
- * @route POST /api/auth/change-password
- * @desc Change password when logged in
- * @access Private
+ * @route PUT /api/auth/users/:userId/role
+ * @desc Change user role
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - Input validation for role change
  */
-router.post(
-  '/change-password',
-  verifyToken,
-  [
-    body('currentPassword').notEmpty().withMessage('Current password is required'),
-    body('newPassword')
-      .isLength({ min: 8 })
-      .withMessage('Password must be at least 8 characters long')
-      .matches(/\d/)
-      .withMessage('Password must contain a number')
-      .matches(/[A-Z]/)
-      .withMessage('Password must contain an uppercase letter'),
-    body('confirmPassword').custom((value, { req }) => {
-      if (value !== req.body.newPassword) {
-        throw new Error('Password confirmation does not match password');
-      }
-      return true;
-    })
-  ],
-  authController.changePassword
+router.put(
+  '/users/:userId/role',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  adminLimiter,
+  validateRequest(validators.changeUserRole),
+  authController.changeUserRole
 );
 
 /**
- * @route GET /api/auth/verify-email/:token
- * @desc Verify user email with token
- * @access Public
+ * @route DELETE /api/auth/users/:userId
+ * @desc Delete user (admin operation)
+ * @access Admin only
+ * @middleware 
+ *   - Authentication token verification
+ *   - Session validation
+ *   - Admin role check
+ *   - 2FA verification for sensitive operation
  */
-router.get('/verify-email/:token', authController.verifyEmail);
+router.delete(
+  '/users/:userId',
+  authenticate,
+  validateSession,
+  checkRole('admin'),
+  verify2FA,
+  adminLimiter,
+  authController.deleteUser
+);
 
 /**
- * @route POST /api/auth/refresh-token
- * @desc Refresh JWT token
- * @access Public
- */
-router.post('/refresh-token', authController.refreshToken);
-
-module.exports = router;
-
