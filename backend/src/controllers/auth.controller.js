@@ -1,93 +1,1047 @@
+/**
+ * @fileoverview Authentication Controller
+ * Handles all authentication-related operations including registration, login, 
+ * password management, token management, session handling, and 2FA.
+ */
+
+const rateLimit = require('express-rate-limit');
+
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const speakeasy = require('speakeasy');
 const qrcode = require('qrcode');
-const asyncWrapper = require('../utils/asyncWrapper');
-const ApiError = require('../utils/apiError');
-const User = require('../models/user.model');
-const emailService = require('../services/email.service');
-const config = require('../config/config');
-const logger = require('../utils/logger');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
+const { promisify } = require('util');
+const { v4: uuidv4 } = require('uuid');
 
 /**
- * Rate limiter for sensitive operations
- * @type {Function}
+ * Rate limiter for authentication attempts
  */
-exports.authLimiter = rateLimit({
+const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // Limit each IP to 10 requests per windowMs
-  message: 'Too many authentication attempts, please try again later',
+  max: 5, // limit each IP to 5 requests per window
+  message: 'Too many authentication attempts from this IP, please try again after 15 minutes',
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (req, res) => {
-    logger.warn(`Rate limit exceeded for IP: ${req.ip}`);
-    res.status(429).json({
-      success: false,
-      message: 'Too many authentication attempts, please try again later',
-    });
-  }
 });
 
 /**
- * Security headers middleware
- * @type {Function}
+ * Rate limiter for account operations (password reset, email verification, etc.)
  */
-exports.securityHeaders = (req, res, next) => {
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'"],
-        fontSrc: ["'self'"],
-        objectSrc: ["'none'"],
-        mediaSrc: ["'self'"],
-        frameSrc: ["'none'"],
-      },
-    },
-    xssFilter: true,
-    noSniff: true,
-    referrerPolicy: { policy: 'same-origin' },
-  })(req, res, next);
-};
+const accountLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // limit each IP to 3 requests per window
+  message: 'Too many account operation attempts from this IP, please try again after an hour',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /**
- * Generate and return access and refresh tokens with rotation
- * @param {Object} user - User document from database
- * @param {boolean} rotateRefreshToken - Whether to generate a new refresh token
- * @returns {Object} - Object containing tokens
+ * Rate limiter for 2FA operations
  */
-const generateTokens = (user, rotateRefreshToken = true) => {
-  const accessToken = jwt.sign(
-    { 
-      id: user._id, 
-      email: user.email,
-      role: user.role,
-      tokenVersion: user.tokenVersion || 0
-    },
-    config.jwt.accessSecret,
-    { expiresIn: config.jwt.accessExpiresIn }
-  );
+const twoFactorLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 10, // limit each IP to 10 requests per window
+  message: 'Too many 2FA attempts from this IP, please try again after 5 minutes',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-  // Only generate a new refresh token if rotation is enabled
-  let refreshToken = user.refreshToken;
-  
-  if (rotateRefreshToken) {
-    refreshToken = jwt.sign(
+const User = require('../models/user.model');
+const Session = require('../models/session.model'); 
+const TokenBlacklist = require('../models/token-blacklist.model');
+const config = require('../config');
+const { 
+  ApiError, 
+  AuthenticationError, 
+  ValidationError, 
+  PermissionError, 
+  RateLimitError,
+  SessionError,
+  ServerError
+} = require('../utils/appError');
+const asyncWrapper = require('../utils/asyncWrapper');
+const EmailService = require('../services/email.service');
+const LogService = require('../services/log.service');
+const redisClient = require('../services/redis.service');
+
+/**
+ * @class AuthController
+ * @description Controller for handling all authentication related operations
+ */
+class AuthController {
+  /**
+   * @method register
+   * @description Register a new user account
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with user data and token
+   */
+  static register = asyncWrapper(async (req, res) => {
+    const { 
+      firstName, 
+      lastName, 
+      email, 
+      password, 
+      passwordConfirm, 
+      phoneNumber,
+      role = 'user',
+      acceptTerms
+    } = req.body;
+
+    // Check if user accepted terms and conditions
+    if (!acceptTerms) {
+      throw ValidationError.invalidInput('You must accept the terms and conditions to register', 'acceptTerms');
+    }
+
+    // Check if passwords match
+    if (password !== passwordConfirm) {
+      throw ValidationError.invalidInput('Passwords do not match', 'passwordConfirm');
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      throw AuthenticationError.userExists('Email is already registered', 'email');
+    }
+
+    // Generate email verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Create new user
+    const newUser = await User.create({
+      firstName,
+      lastName,
+      email: email.toLowerCase(),
+      password, // Model handles hashing
+      phoneNumber,
+      role,
+      verificationToken,
+      verificationTokenExpires,
+      isEmailVerified: false,
+      tokenVersion: 0,
+      lastLogin: null,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    // Send verification email
+    try {
+      const verificationUrl = `${config.clientUrl}/verify-email?token=${verificationToken}`;
+      
+      await EmailService.sendVerificationEmail({
+        to: newUser.email,
+        firstName: newUser.firstName,
+        verificationUrl
+      });
+    } catch (error) {
+      // Log email error but don't stop registration process
+      LogService.error('Failed to send verification email', {
+        error: error.message,
+        userId: newUser._id
+      });
+    }
+
+    // Generate JWT tokens
+    const { accessToken, refreshToken } = this._generateTokens(newUser);
+
+    // Record user activity
+    LogService.info('User registered', {
+      userId: newUser._id,
+      email: newUser.email,
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Set refresh token in HTTP-only cookie
+    this._setRefreshTokenCookie(res, refreshToken);
+
+    // Return response without sensitive data
+    const userWithoutSensitiveData = newUser.toJSON();
+    delete userWithoutSensitiveData.password;
+    delete userWithoutSensitiveData.verificationToken;
+
+    res.status(201).json({
+      success: true,
+      data: {
+        user: userWithoutSensitiveData,
+        accessToken,
+        expiresIn: config.jwt.accessExpiresIn
+      },
+      message: 'Registration successful. Please verify your email address.'
+    });
+  });
+
+  /**
+   * @method login
+   * @description Log in a user with email and password
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with user data and token
+   */
+  static login = asyncWrapper(async (req, res) => {
+    const { email, password, rememberMe = false } = req.body;
+
+    // Check if email and password are provided
+    if (!email || !password) {
+      throw ValidationError.invalidInput('Please provide email and password', 'credentials');
+    }
+
+    // Find user by email with password field
+    const user = await User.findOne({ email: email.toLowerCase() }).select('+password +loginAttempts +lockUntil +is2FAEnabled +twoFactorSecret');
+
+    // Check if user exists and password is correct
+    if (!user || !(await user.comparePassword(password))) {
+      // Increment login attempts
+      if (user) {
+        user.loginAttempts += 1;
+        
+        // Lock account after 5 failed attempts
+        if (user.loginAttempts >= 5) {
+          user.lockUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+          LogService.warn('Account locked due to multiple failed login attempts', {
+            userId: user._id,
+            email: user.email,
+            ip: req.ip
+          });
+        }
+        
+        await user.save();
+      }
+      
+      throw AuthenticationError.invalidCredentials('Invalid email or password');
+    }
+
+    // Check if account is locked
+    if (user.lockUntil && user.lockUntil > Date.now()) {
+      const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
+      throw AuthenticationError.accountLocked(`Account locked. Try again in ${minutesLeft} minutes`);
+    }
+
+    // Check if email is verified
+    if (!user.isEmailVerified) {
+      throw AuthenticationError.unverifiedEmail('Please verify your email address before logging in');
+    }
+
+    // Check if account is active
+    if (!user.isActive) {
+      throw AuthenticationError.accountDisabled('Your account has been disabled. Please contact support');
+    }
+
+    // Reset login attempts on successful login
+    user.loginAttempts = 0;
+    user.lockUntil = null;
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Create session
+    const session = await Session.create({
+      userId: user._id,
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+      expiresAt: rememberMe 
+        ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
+        : new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+    });
+
+    // Check if 2FA is enabled
+    if (user.is2FAEnabled) {
+      // Create temporary token for 2FA verification
+      const tempToken = jwt.sign(
+        { id: user._id, sessionId: session._id, require2FA: true },
+        config.jwt.secret,
+        { expiresIn: '5m' }
+      );
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          require2FA: true,
+          tempToken
+        },
+        message: 'Two-factor authentication required'
+      });
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = this._generateTokens(user, session._id);
+
+    // Set refresh token cookie
+    this._setRefreshTokenCookie(res, refreshToken, rememberMe);
+
+    // Log login activity
+    LogService.info('User logged in', {
+      userId: user._id,
+      email: user.email,
+      ip: req.ip,
+      sessionId: session._id,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Return user data and token
+    const userWithoutSensitiveData = user.toJSON();
+    delete userWithoutSensitiveData.password;
+    delete userWithoutSensitiveData.loginAttempts;
+    delete userWithoutSensitiveData.lockUntil;
+    delete userWithoutSensitiveData.twoFactorSecret;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        user: userWithoutSensitiveData,
+        accessToken,
+        expiresIn: config.jwt.accessExpiresIn,
+        sessionId: session._id
+      },
+      message: 'Login successful'
+    });
+  });
+
+  /**
+   * @method verifyTwoFactor
+   * @description Verify 2FA code and complete login
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with user data and token
+   */
+  static verifyTwoFactor = asyncWrapper(async (req, res) => {
+    const { code, tempToken } = req.body;
+
+    if (!code || !tempToken) {
+      throw ValidationError.invalidInput('Verification code and token are required');
+    }
+
+    // Verify temp token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, config.jwt.secret);
+    } catch (error) {
+      throw AuthenticationError.invalidToken('Invalid or expired token. Please login again');
+    }
+
+    // Check if token has 2FA requirement
+    if (!decoded.require2FA) {
+      throw AuthenticationError.invalidToken('Invalid token type');
+    }
+
+    // Find user
+    const user = await User.findById(decoded.id).select('+twoFactorSecret');
+    if (!user) {
+      throw AuthenticationError.userNotFound('User not found');
+    }
+
+    // Find session
+    const session = await Session.findById(decoded.sessionId);
+    if (!session) {
+      throw SessionError.invalidSession('Session not found');
+    }
+
+    // Verify code
+    const isValid = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: code,
+      window: 1 // Allow 30 seconds window
+    });
+
+    if (!isValid) {
+      LogService.warn('Invalid 2FA attempt', {
+        userId: user._id,
+        ip: req.ip,
+        sessionId: session._id
+      });
+      throw AuthenticationError.invalid2FACode('Invalid verification code');
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = this._generateTokens(user, session._id);
+
+    // Set refresh token cookie
+    this._setRefreshTokenCookie(res, refreshToken, session.expiresAt > Date.now() + 24 * 60 * 60 * 1000);
+
+    // Update session
+    session.lastActiveAt = new Date();
+    await session.save();
+
+    // Log successful 2FA
+    LogService.info('User completed 2FA verification', {
+      userId: user._id,
+      ip: req.ip,
+      sessionId: session._id
+    });
+
+    // Return user data and token
+    const userWithoutSensitiveData = user.toJSON();
+    delete userWithoutSensitiveData.password;
+    delete userWithoutSensitiveData.twoFactorSecret;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        user: userWithoutSensitiveData,
+        accessToken,
+        expiresIn: config.jwt.accessExpiresIn,
+        sessionId: session._id
+      },
+      message: 'Two-factor authentication successful'
+    });
+  });
+
+  /**
+   * @method setupTwoFactor
+   * @description Set up 2FA for a user
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with 2FA setup data
+   */
+  static setupTwoFactor = asyncWrapper(async (req, res) => {
+    // Get user from authenticated request
+    const user = req.user;
+
+    // Generate new secret
+    const secret = speakeasy.generateSecret({
+      length: 20,
+      name: `ImmigrationApp:${user.email}`
+    });
+
+    // Generate QR code
+    const qrCodeUrl = await qrcode.toDataURL(secret.otpauth_url);
+
+    // Save secret temporarily in Redis with 10-minute expiry
+    const setupKey = `2fa_setup:${user._id}`;
+    await redisClient.setex(setupKey, 600, secret.base32);
+
+    // Log 2FA setup attempt
+    LogService.info('User initiated 2FA setup', {
+      userId: user._id,
+      ip: req.ip
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        qrCode: qrCodeUrl,
+        secret: secret.base32, // Only shown once during setup
+        setupKey
+      },
+      message: 'Two-factor authentication setup initiated'
+    });
+  });
+
+  /**
+   * @method confirmTwoFactor
+   * @description Confirm and enable 2FA for a user
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with confirmation result
+   */
+  static confirmTwoFactor = asyncWrapper(async (req, res) => {
+    const { code, setupKey } = req.body;
+    const user = req.user;
+
+    if (!code || !setupKey) {
+      throw ValidationError.invalidInput('Verification code and setup key are required');
+    }
+
+    // Get secret from Redis
+    const secret = await redisClient.get(setupKey);
+    if (!secret) {
+      throw ValidationError.invalidInput('Setup session expired or invalid. Please restart the 2FA setup process');
+    }
+
+    // Verify code
+    const isValid = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    });
+
+    if (!isValid) {
+      throw ValidationError.invalidInput('Invalid verification code');
+    }
+
+    // Enable 2FA for user
+    await User.findByIdAndUpdate(user._id, {
+      is2FAEnabled: true,
+      twoFactorSecret: secret,
+      updatedAt: new Date()
+    });
+
+    // Delete setup key from Redis
+    await redisClient.del(setupKey);
+
+    // Generate backup codes
+    const backupCodes = [];
+    for (let i = 0; i < 10; i++) {
+      backupCodes.push(crypto.randomBytes(4).toString('hex'));
+    }
+
+    // Hash and store backup codes
+    const hashedBackupCodes = await Promise.all(
+      backupCodes.map(async (code) => {
+        const salt = await bcrypt.genSalt(10);
+        return await bcrypt.hash(code, salt);
+      })
+    );
+
+    await User.findByIdAndUpdate(user._id, {
+      backupCodes: hashedBackupCodes
+    });
+
+    // Log 2FA setup completion
+    LogService.info('User enabled 2FA', {
+      userId: user._id,
+      ip: req.ip
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        backupCodes
+      },
+      message: 'Two-factor authentication enabled successfully. Please save your backup codes.'
+    });
+  });
+
+  /**
+   * @method logout
+   * @description Log out a user by invalidating their session and clearing cookies
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with logout status
+   */
+  static logout = asyncWrapper(async (req, res) => {
+    const { sessionId } = req.body;
+    const user = req.user;
+
+    try {
+      // If specific session ID is provided, only invalidate that session
+      if (sessionId) {
+        await Session.findOneAndUpdate(
+          { _id: sessionId, userId: user._id },
+          { isActive: false, endedAt: new Date() }
+        );
+
+        LogService.info('Session logged out', {
+          userId: user._id,
+          sessionId,
+          ip: req.ip
+        });
+      } else {
+        // Otherwise, invalidate all sessions for this user
+        await Session.updateMany(
+          { userId: user._id, isActive: true },
+          { isActive: false, endedAt: new Date() }
+        );
+
+        LogService.info('All sessions logged out', {
+          userId: user._id,
+          ip: req.ip
+        });
+      }
+
+      // Blacklist the current refresh token if it exists
+      const refreshToken = req.cookies.refreshToken;
+      if (refreshToken) {
+        try {
+          const decoded = jwt.verify(refreshToken, config.jwt.refreshSecret);
+          
+          // Add token to blacklist with expiry matching token expiry
+          await TokenBlacklist.create({
+            token: refreshToken,
+            userId: user._id,
+            expiresAt: new Date(decoded.exp * 1000)
+          });
+        } catch (error) {
+          // If token verification fails, we can safely ignore
+          LogService.debug('Failed to blacklist refresh token', {
+            error: error.message
+          });
+        }
+      }
+
+      // Clear refresh token cookie
+      this._clearRefreshTokenCookie(res);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Logged out successfully'
+      });
+    } catch (error) {
+      LogService.error('Logout failed', {
+        userId: user._id,
+        error: error.message,
+        ip: req.ip
+      });
+
+      // Still clear cookies on client side even if server operations fail
+      this._clearRefreshTokenCookie(res);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Logged out successfully'
+      });
+    }
+  });
+
+  /**
+   * @method refreshToken
+   * @description Refresh the access token using a valid refresh token
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with new access token
+   */
+  static refreshToken = asyncWrapper(async (req, res) => {
+    const { refreshToken } = req.cookies;
+
+    if (!refreshToken) {
+      throw AuthenticationError.missingToken('Refresh token is required');
+    }
+
+    // Check if token is blacklisted
+    const isBlacklisted = await TokenBlacklist.findOne({ token: refreshToken });
+    if (isBlacklisted) {
+      this._clearRefreshTokenCookie(res);
+      throw AuthenticationError.invalidToken('Invalid refresh token');
+    }
+
+    try {
+      // Verify refresh token
+      const decoded = jwt.verify(refreshToken, config.jwt.refreshSecret);
+
+      // Find user and session
+      const user = await User.findById(decoded.id);
+      if (!user) {
+        throw AuthenticationError.userNotFound('User not found');
+      }
+
+      // Verify token version matches
+      if (decoded.tokenVersion !== user.tokenVersion) {
+        throw AuthenticationError.invalidToken('Token has been revoked');
+      }
+
+      // Find active session if sessionId is in token
+      let session = null;
+      if (decoded.sessionId) {
+        session = await Session.findOne({
+          _id: decoded.sessionId,
+          userId: user._id,
+          isActive: true
+        });
+
+        if (!session) {
+          throw SessionError.invalidSession('Session not found or inactive');
+        }
+
+        // Update session last active time
+        session.lastActiveAt = new Date();
+        await session.save();
+      }
+
+      // Generate new access token, but keep the same refresh token
+      const { accessToken } = this._generateTokens(user, session?._id, false);
+
+      // Log refresh activity
+      LogService.info('Token refreshed', {
+        userId: user._id,
+        ip: req.ip,
+        sessionId: session?._id
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          accessToken,
+          expiresIn: config.jwt.accessExpiresIn
+        },
+        message: 'Token refreshed successfully'
+      });
+    } catch (error) {
+      // Clear refresh token cookie if invalid
+      this._clearRefreshTokenCookie(res);
+
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      // JWT verification errors
+      if (error.name === 'TokenExpiredError') {
+        throw AuthenticationError.expiredToken('Refresh token has expired');
+      }
+      
+      throw AuthenticationError.invalidToken('Invalid refresh token');
+    }
+  });
+
+  /**
+   * @method forgotPassword
+   * @description Send a password reset email to the user
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with password reset status
+   */
+  static forgotPassword = asyncWrapper(async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+      throw ValidationError.invalidInput('Email is required');
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      // For security reasons, don't reveal if email exists or not
+      return res.status(200).json({
+        success: true,
+        message: 'If your email is registered, you will receive a password reset link'
+      });
+    }
+
+    // Check for frequent reset requests
+    const resetKey = `password_reset:${user._id}`;
+    const resetCount = await redisClient.get(resetKey);
+    if (resetCount && parseInt(resetCount, 10) >= 3) {
+      throw RateLimitError.tooManyRequests('Too many password reset requests. Please try again later.');
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    // Hash token before storing in database for security
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(resetToken)
+      .digest('hex');
+
+    // Save hashed token to user
+    user.passwordResetToken = hashedToken;
+    user.passwordResetExpires = resetTokenExpires;
+    await user.save({ validateBeforeSave: false });
+
+    // Increment reset request count in Redis
+    await redisClient.incr(resetKey);
+    await redisClient.expire(resetKey, 60 * 60); // 1 hour expiry
+
+    // Generate reset URL
+    const resetUrl = `${config.clientUrl}/reset-password?token=${resetToken}`;
+
+    try {
+      // Send password reset email
+      await EmailService.sendPasswordResetEmail({
+        to: user.email,
+        firstName: user.firstName,
+        resetUrl,
+        expiresIn: '1 hour'
+      });
+
+      // Log password reset request
+      LogService.info('Password reset requested', {
+        userId: user._id,
+        email: user.email,
+        ip: req.ip
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'If your email is registered, you will receive a password reset link'
+      });
+    } catch (error) {
+      // Reset token fields in database if email fails
+      user.passwordResetToken = undefined;
+      user.passwordResetExpires = undefined;
+      await user.save({ validateBeforeSave: false });
+
+      LogService.error('Failed to send password reset email', {
+        userId: user._id,
+        email: user.email,
+        error: error.message,
+        ip: req.ip
+      });
+
+      throw ServerError.emailFailed('Failed to send password reset email. Please try again later.');
+    }
+  });
+
+  /**
+   * @method resetPassword
+   * @description Reset a user's password using a valid reset token
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with password reset status
+   */
+  static resetPassword = asyncWrapper(async (req, res) => {
+    const { token, password, passwordConfirm } = req.body;
+
+    if (!token || !password || !passwordConfirm) {
+      throw ValidationError.invalidInput('Token and new password are required');
+    }
+
+    if (password !== passwordConfirm) {
+      throw ValidationError.invalidInput('Passwords do not match', 'passwordConfirm');
+    }
+
+    // Hash the token provided by the user
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(token)
+      .digest('hex');
+
+    // Find user with valid token
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      throw AuthenticationError.invalidToken('Invalid or expired password reset token');
+    }
+
+    // Update password and clear reset token fields
+    user.password = password;
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    
+    // Increment token version to invalidate all existing tokens
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    
+    await user.save();
+
+    // Invalidate all active sessions
+    await Session.updateMany(
+      { userId: user._id, isActive: true },
+      { isActive: false, endedAt: new Date() }
+    );
+
+    // Log password reset
+    LogService.info('Password reset successful', {
+      userId: user._id,
+      email: user.email,
+      ip: req.ip
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password has been reset successfully. You can now log in with your new password.'
+    });
+  });
+
+  /**
+   * @method verifyEmail
+   * @description Verify a user's email using a verification token
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with email verification status
+   */
+  static verifyEmail = asyncWrapper(async (req, res) => {
+    const { token } = req.body;
+    if (!token) {
+      throw ValidationError.invalidInput('Verification token is required');
+    }
+
+    // Find user with matching verification token
+    const user = await User.findOne({
+      verificationToken: token,
+      verificationTokenExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      throw AuthenticationError.invalidToken('Invalid verification token or token has expired');
+    }
+
+    // Update user to verified status
+    user.isEmailVerified = true;
+    user.verificationToken = undefined;
+    user.verificationTokenExpires = undefined;
+    user.updatedAt = new Date();
+    await user.save();
+
+    // Log verification success
+    LogService.info('Email verified successfully', {
+      userId: user._id,
+      email: user.email,
+      ip: req.ip
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Email verified successfully. You can now log in.'
+    });
+  });
+
+  /**
+   * @method resendVerification
+   * @description Resend email verification token to user
+   * @param {Object} req - Express request object
+   * @param {Object} res - Express response object
+   * @returns {Object} JSON response with verification status
+   */
+  static resendVerification = asyncWrapper(async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+      throw ValidationError.invalidInput('Email is required');
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    // For security reasons, don't reveal if email exists or not
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: 'If your email is registered, a verification email has been sent.'
+      });
+    }
+
+    // Check if user is already verified
+    if (user.isEmailVerified) {
+      return res.status(200).json({
+        success: true,
+        message: 'Your email is already verified. You can log in.'
+      });
+    }
+
+    // Check for frequent verification requests
+    const verificationKey = `email_verification:${user._id}`;
+    const verificationCount = await redisClient.get(verificationKey);
+    if (verificationCount && parseInt(verificationCount, 10) >= 3) {
+      throw RateLimitError.tooManyRequests('Too many verification requests. Please try again later.');
+    }
+
+    // Generate new verification token
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Save new token to user
+    user.verificationToken = verificationToken;
+    user.verificationTokenExpires = verificationTokenExpires;
+    await user.save({ validateBeforeSave: false });
+
+    // Increment verification request count in Redis
+    await redisClient.incr(verificationKey);
+    await redisClient.expire(verificationKey, 60 * 60); // 1 hour expiry
+
+    // Generate verification URL
+    const verificationUrl = `${config.clientUrl}/verify-email?token=${verificationToken}`;
+
+    try {
+      // Send verification email
+      await EmailService.sendVerificationEmail({
+        to: user.email,
+        firstName: user.firstName,
+        verificationUrl
+      });
+
+      // Log verification request
+      LogService.info('Verification email resent', {
+        userId: user._id,
+        email: user.email,
+        ip: req.ip
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'If your email is registered, a verification email has been sent.'
+      });
+    } catch (error) {
+      // If email fails, log error
+      LogService.error('Failed to send verification email', {
+        userId: user._id,
+        email: user.email,
+        error: error.message,
+        ip: req.ip
+      });
+
+      throw ServerError.emailFailed('Failed to send verification email. Please try again later.');
+    }
+  });
+
+  /**
+   * @method _generateTokens
+   * @description Generate access and refresh tokens for a user
+   * @param {Object} user - The user object
+   * @param {String} sessionId - Optional session ID to include in tokens
+   * @param {Boolean} genRefreshToken - Whether to generate a new refresh token
+   * @returns {Object} Object containing accessToken and refreshToken
+   * @private
+   */
+  static _generateTokens(user, sessionId = null, genRefreshToken = true) {
+    // Generate access token with user data and expiry
+    const accessToken = jwt.sign(
       { 
         id: user._id,
-        tokenVersion: user.tokenVersion || 0 
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+        sessionId,
+        tokenVersion: user.tokenVersion || 0
       },
-      config.jwt.refreshSecret,
-      { expiresIn: config.jwt.refreshExpiresIn }
+      config.jwt.secret,
+      { expiresIn: config.jwt.accessExpiresIn }
     );
+
+    // Only generate refresh token if required
+    let refreshToken = null;
+    if (genRefreshToken) {
+      refreshToken = jwt.sign(
+        { 
+          id: user._id,
+          sessionId,
+          tokenVersion: user.tokenVersion || 0
+        },
+        config.jwt.refreshSecret,
+        { expiresIn: config.jwt.refreshExpiresIn }
+      );
+    }
+
+    return { accessToken, refreshToken };
   }
 
-  return { accessToken, refreshToken };
+  /**
+   * @method _setRefreshTokenCookie
+   * @description Set refresh token as HTTP-only cookie
+   * @param {Object} res - Express response object
+   * @param {String} refreshToken - The refresh token to set
+   * @param {Boolean} rememberMe - Whether to set extended expiry
+   * @private
+   */
+  static _setRefreshTokenCookie(res, refreshToken, rememberMe = false) {
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/api/auth',
+      maxAge: rememberMe 
+        ? 30 * 24 * 60 * 60 * 1000 // 30 days
+        : 24 * 60 * 60 * 1000 // 24 hours
+    };
+
+    res.cookie('refreshToken', refreshToken, cookieOptions);
+  }
+
+  /**
+   * @method _clearRefreshTokenCookie
+   * @description Clear refresh token cookie
+   * @param {Object} res - Express response object
+   * @private
+   */
+  static _clearRefreshTokenCookie(res) {
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/api/auth'
+    });
+  }
+}
+
+// Export the controller
+module.exports = AuthController;
 };
 /**
  * Register a new user with email verification
