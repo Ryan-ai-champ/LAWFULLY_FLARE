@@ -8,37 +8,97 @@ const User = require('../models/user.model');
 const emailService = require('../services/email.service');
 const config = require('../config/config');
 const logger = require('../utils/logger');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
 /**
- * Generate and return access and refresh tokens
+ * Rate limiter for sensitive operations
+ * @type {Function}
+ */
+exports.authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each IP to 10 requests per windowMs
+  message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn(`Rate limit exceeded for IP: ${req.ip}`);
+    res.status(429).json({
+      success: false,
+      message: 'Too many authentication attempts, please try again later',
+    });
+  }
+});
+
+/**
+ * Security headers middleware
+ * @type {Function}
+ */
+exports.securityHeaders = (req, res, next) => {
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'self'"],
+        frameSrc: ["'none'"],
+      },
+    },
+    xssFilter: true,
+    noSniff: true,
+    referrerPolicy: { policy: 'same-origin' },
+  })(req, res, next);
+};
+
+/**
+ * Generate and return access and refresh tokens with rotation
  * @param {Object} user - User document from database
+ * @param {boolean} rotateRefreshToken - Whether to generate a new refresh token
  * @returns {Object} - Object containing tokens
  */
-const generateTokens = (user) => {
+const generateTokens = (user, rotateRefreshToken = true) => {
   const accessToken = jwt.sign(
     { 
       id: user._id, 
       email: user.email,
-      role: user.role
+      role: user.role,
+      tokenVersion: user.tokenVersion || 0
     },
     config.jwt.accessSecret,
     { expiresIn: config.jwt.accessExpiresIn }
   );
 
-  const refreshToken = jwt.sign(
-    { id: user._id },
-    config.jwt.refreshSecret,
-    { expiresIn: config.jwt.refreshExpiresIn }
-  );
+  // Only generate a new refresh token if rotation is enabled
+  let refreshToken = user.refreshToken;
+  
+  if (rotateRefreshToken) {
+    refreshToken = jwt.sign(
+      { 
+        id: user._id,
+        tokenVersion: user.tokenVersion || 0 
+      },
+      config.jwt.refreshSecret,
+      { expiresIn: config.jwt.refreshExpiresIn }
+    );
+  }
 
   return { accessToken, refreshToken };
 };
-
 /**
  * Register a new user with email verification
+ * @route POST /api/auth/register
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @returns {Object} Response with registration status
+ * @throws {ApiError} If validation fails or user creation fails
  */
 exports.register = asyncWrapper(async (req, res) => {
-  const { email, password, firstName, lastName, phoneNumber } = req.body;
+  const { email, password, firstName, lastName, phoneNumber, role } = req.body;
 
   // Check if user already exists
   const existingUser = await User.findOne({ email });
@@ -50,116 +110,124 @@ exports.register = asyncWrapper(async (req, res) => {
   const verificationToken = crypto.randomBytes(32).toString('hex');
   const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-  // Create user with verification token
+  // Create user with verification token - enforce client role for public registration
   const user = await User.create({
     email,
     password,
     firstName,
     lastName,
     phoneNumber,
+    role: role === 'client' ? 'client' : 'client', // Force client role for security
     emailVerificationToken: verificationToken,
     emailVerificationExpires: verificationExpires,
+    tokenVersion: 0,
+    loginAttempts: 0,
+    lastLoginAttempt: null
   });
 
   // Generate verification URL
   const verificationUrl = `${config.frontendUrl}/verify-email?token=${verificationToken}`;
 
-  // Send verification email
-  await emailService.sendTemplateEmail({
-    to: email,
-    subject: 'Please verify your email address',
-    template: 'verify-email',
-    data: {
-      name: firstName,
-      verificationUrl,
-      expiresIn: '24 hours',
-      supportEmail: config.supportEmail
-    }
-  });
+  try {
+    // Send verification email
+    await emailService.sendTemplateEmail({
+      to: email,
+      subject: 'Please verify your email address',
+      template: 'verify-email',
+      data: {
+        name: firstName,
+        verificationUrl,
+        expiresIn: '24 hours',
+        supportEmail: config.supportEmail
+      }
+    });
 
-  logger.info(`New user registered: ${email}`);
+    logger.info(`New user registered: ${email}`);
 
-  res.status(201).json({
-    success: true,
-    message: 'Registration successful. Please check your email to verify your account.'
-  });
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful. Please check your email to verify your account.'
+    });
+  } catch (error) {
+    // If email fails, we should cleanup the created user to maintain consistency
+    await User.findByIdAndDelete(user._id);
+    logger.error(`Failed to send verification email to ${email}: ${error.message}`);
+    throw new ApiError('Registration failed: Could not send verification email', 500);
+  }
 });
 
 /**
- * Verify user email with token
+ * Register staff member (admin, attorney, paralegal) - Admin only
+ * @route POST /api/auth/register-staff
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @returns {Object} Response with registration status
+ * @throws {ApiError} If validation fails or user creation fails
  */
-exports.verifyEmail = asyncWrapper(async (req, res) => {
-  const { token } = req.params;
+exports.registerStaff = asyncWrapper(async (req, res) => {
+  const { email, password, firstName, lastName, phoneNumber, role } = req.body;
 
-  const user = await User.findOne({
-    emailVerificationToken: token,
-    emailVerificationExpires: { $gt: Date.now() }
-  });
-
-  if (!user) {
-    throw new ApiError('Invalid or expired verification token', 400);
+  // Check if user already exists
+  const existingUser = await User.findOne({ email });
+  if (existingUser) {
+    throw new ApiError('Email already in use', 400);
   }
 
-  // Update user status
-  user.isEmailVerified = true;
-  user.emailVerificationToken = undefined;
-  user.emailVerificationExpires = undefined;
-  await user.save();
-
-  logger.info(`Email verified for user: ${user.email}`);
-
-  res.status(200).json({
-    success: true,
-    message: 'Email verification successful. You can now log in.'
-  });
-});
-
-/**
- * Resend email verification token
- */
-exports.resendVerificationEmail = asyncWrapper(async (req, res) => {
-  const { email } = req.body;
-
-  const user = await User.findOne({ email });
-  if (!user) {
-    throw new ApiError('User not found', 404);
-  }
-
-  if (user.isEmailVerified) {
-    throw new ApiError('Email already verified', 400);
-  }
-
-  // Create new verification token
+  // Create verification token
   const verificationToken = crypto.randomBytes(32).toString('hex');
   const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-  user.emailVerificationToken = verificationToken;
-  user.emailVerificationExpires = verificationExpires;
-  await user.save();
+  // Validate role is one of the allowed staff roles
+  const allowedRoles = ['admin', 'attorney', 'paralegal'];
+  const staffRole = allowedRoles.includes(role) ? role : 'paralegal'; // Default to paralegal
+
+  // Create staff user with verification token
+  const user = await User.create({
+    email,
+    password,
+    firstName,
+    lastName,
+    phoneNumber,
+    role: staffRole,
+    emailVerificationToken: verificationToken,
+    emailVerificationExpires: verificationExpires,
+    tokenVersion: 0,
+    loginAttempts: 0,
+    lastLoginAttempt: null
+  });
 
   // Generate verification URL
   const verificationUrl = `${config.frontendUrl}/verify-email?token=${verificationToken}`;
 
-  // Send verification email
-  await emailService.sendTemplateEmail({
-    to: email,
-    subject: 'Please verify your email address',
-    template: 'verify-email',
-    data: {
-      name: user.firstName,
-      verificationUrl,
-      expiresIn: '24 hours',
-      supportEmail: config.supportEmail
-    }
-  });
+  try {
+    // Send verification email
+    await emailService.sendTemplateEmail({
+      to: email,
+      subject: 'Staff Account Created - Please verify your email',
+      template: 'verify-email',
+      data: {
+        name: firstName,
+        verificationUrl,
+        expiresIn: '24 hours',
+        supportEmail: config.supportEmail
+      }
+    });
 
-  logger.info(`Verification email resent to: ${email}`);
+    logger.info(`New staff member registered (${staffRole}): ${email}`);
 
-  res.status(200).json({
-    success: true,
-    message: 'Verification email resent successfully'
-  });
+    res.status(201).json({
+      success: true,
+      message: 'Staff registration successful. Please check the email to verify the account.'
+    });
+  } catch (error) {
+    // If email fails, we should cleanup the created user to maintain consistency
+    await User.findByIdAndDelete(user._id);
+    logger.error(`Failed to send verification email to staff ${email}: ${error.message}`);
+    throw new ApiError('Staff registration failed: Could not send verification email', 500);
+  }
 });
+/**
+ * Verify user
 
 /**
  * Login user and generate JWT and refresh token
