@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5002:5002"
+  backend:
+    build: ./backend
+    ports:
+      - "5001:5001"
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"

@@ -1,0 +1,29 @@
+VERIFY YOUR EMAIL ADDRESS
+
+Hello {{name}},
+
+Thank you for registering with our Immigration Assistant. To complete your registration and access all features, please verify your email address by visiting the link below:
+
+{{verificationLink}}
+
+IMPORTANT: This verification link will expire in 48 hours. If you don't verify your email within this timeframe, you'll need to request a new verification link.
+
+BENEFITS OF A VERIFIED ACCOUNT:
+- Full access to all application features
+- Receive important case status updates
+- Secure document sharing and management
+- Direct communication with immigration specialists
+- Personalized case tracking and notifications
+
+If you didn't create an account or request this verification, please disregard this email or contact our support team.
+
+If you need assistance, please contact our support team at:
+Email: {{supportEmail}}
+Phone: {{supportPhone}}
+
+Thank you,
+The Immigration Assistant Team
+
+© {{currentYear}} Immigration Assistant. All rights reserved.
+This email was sent to {{emailAddress}}.
+

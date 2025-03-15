@@ -1,0 +1,58 @@
+CASE STATUS UPDATE
+=================
+
+Dear {{clientName}},
+
+We are writing to inform you that the status of your immigration case has been updated.
+
+NEW STATUS: {{newStatus}}
+
+CASE DETAILS:
+------------
+Case Number: {{caseNumber}}
+Case Type: {{caseType}}
+Previous Status: {{previousStatus}}
+Updated Date: {{updateDate}}
+Assigned Agent: {{agentName}}
+
+STATUS UPDATE DETAILS:
+---------------------
+{{statusUpdateDetails}}
+
+NEXT STEPS:
+----------
+Based on this update, here are the next steps for your case:
+{{#each nextSteps}}
+- {{this}}
+{{/each}}
+
+{{#if requiredAction}}
+ACTION REQUIRED: {{requiredAction}}
+{{#if actionDeadline}}
+Please complete this action by: {{actionDeadline}}
+{{/if}}
+{{/if}}
+
+To view your case details, please visit: {{portalUrl}}
+
+CASE TIMELINE:
+-------------
+{{#each timelineEvents}}
+{{this.date}} - {{this.event}}
+{{this.description}}
+
+{{/each}}
+
+QUESTIONS?
+---------
+If you have any questions or need further clarification about this update, please do not hesitate to contact us:
+
+Email: {{supportEmail}}
+Phone: {{supportPhone}}
+Hours: {{supportHours}}
+
+---
+This email was sent to {{clientEmail}} regarding Case #{{caseNumber}}.
+© {{currentYear}} Immigration Services. All rights reserved.
+Please do not reply to this email as it is automatically generated.
+

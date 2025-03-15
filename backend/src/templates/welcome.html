@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to ImmigrationApp</title>
+    <style>
+        /* Reset styles */
+        body, html {
+            margin: 0;
+            padding: 0;
+            font-family: 'Poppins', Arial, sans-serif;
+            line-height: 1.6;
+            color: #1E1E1E;
+        }
+        
+        /* Container */
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #F7F5F3;
+        }
+        
+        /* Header */
+        .header {
+            background-color: #092B55;
+            color: #FFFFFF;
+            padding: 30px 20px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        /* Content */
+        .content {
+            padding: 30px 20px;
+            background-color: #FFFFFF;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+        
+        /* Button */
+        .button {
+            display: inline-block;
+            background-color: #2191F3;
+            color: #FFFFFF;
+            text-decoration: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            font-weight: 600;
+            margin: 20px 0;
+        }
+        
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #88909B;
+            font-size: 12px;
+        }
+        
+        /* Responsive */
+        @media only screen and (max-width: 480px) {
+            .container {
+                width: 100%;
+                padding: 10px;
+            }
+            
+            .content {
+                padding: 20px 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Welcome to ImmigrationApp</h1>
+        </div>
+        
+        <div class="content">
+            <h2>Hello {{name}},</h2>
+            
+            <p>Thank you for registering with ImmigrationApp. We're excited to help you navigate your immigration journey with ease and confidence.</p>
+            
+            <p>With your new account, you can:</p>
+            <ul>
+                <li>Track your immigration case status</li>
+                <li>Securely upload and store documents</li>
+                <li>Communicate with your legal representatives</li>
+                <li>Receive timely updates and notifications</li>
+            </ul>
+            
+            <p>To get started, please verify your email address by clicking the button below:</p>
+            
+            <div style="text-align: center;">
+                <a href="{{verificationLink}}" class="button">Verify Email</a>
+            </div>
+            
+            <p>If the button doesn't work, you can also copy and paste the following link into your browser:</p>
+            <p style="word-break: break-all; font-size: 14px;">{{verificationLink}}</p>
+            
+            <p>If you have any questions or need assistance, please don't hesitate to contact our support team at <a href="mailto:support@immigrationapp.com">support@immigrationapp.com</a>.</p>
+            
+            <p>Best regards,<br>The ImmigrationApp Team</p>
+        </div>
+        
+        <div class="footer">
+            <p>&copy; 2023 ImmigrationApp. All rights reserved.</p>
+            <p>This email was sent to {{email}}. If you didn't create this account, please <a href="{{unsubscribeLink}}">click here</a>.</p>
+        </div>
+    </div>
+</body>
+</html>
+
