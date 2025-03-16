@@ -1,5 +1,159 @@
 # LAWFULLY_FLARE - Immigration Case Management System
 
+## Table of Contents
+1. [Project Overview](#project-overview)
+2. [Prerequisites](#prerequisites)
+3. [Environment Setup](#environment-setup)
+4. [Installation](#installation)
+5. [Running Locally](#running-locally)
+6. [Deployment](#deployment)
+7. [Testing](#testing)
+8. [Production Best Practices](#production-best-practices)
+
+## Project Overview
+This application is a case management system for immigration law services, providing both backend API services and a frontend user interface.
+
+## Prerequisites
+Before you begin, ensure you have the following installed:
+- Node.js (v16.x or later)
+- npm (v8.x or later)
+- Python (v3.9 or later)
+- PostgreSQL (v12 or later)
+- Git
+
+## Environment Setup
+
+### Backend
+1. Create a `.env` file in the backend directory:
+   ```bash
+   cd backend
+   touch .env
+   ```
+2. Add the following environment variables to `.env`:
+   ```
+   DATABASE_URL=postgres://username:password@localhost:5432/lawfully_flare
+   SECRET_KEY=your-secret-key
+   DEBUG=True
+   ```
+
+### Frontend
+1. Create a `.env` file in the frontend directory:
+   ```bash
+   cd frontend
+   touch .env
+   ```
+2. Add the following environment variables to `.env`:
+   ```
+   REACT_APP_API_URL=http://localhost:5001
+   ```
+
+## Installation
+
+### Backend
+1. Navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Frontend
+1. Navigate to the frontend directory:
+   ```bash
+   cd frontend
+   ```
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+## Running Locally
+
+### Backend
+1. Run migrations:
+   ```bash
+   python manage.py migrate
+   ```
+2. Start the development server:
+   ```bash
+   python manage.py runserver
+   ```
+
+### Frontend
+1. Start the development server:
+   ```bash
+   npm start
+   ```
+
+## Deployment
+
+### Deployment with PM2
+
+1. Start the backend server with PM2:
+   ```bash
+   cd backend
+   pm2 start index.js --name backend --watch --port 5002
+   ```
+
+2. Start the frontend server with PM2:
+   ```bash
+   cd frontend
+   pm2 start npm --name frontend -- start -- --port 5001
+   ```
+
+3. Save the PM2 process list to ensure processes are restored on restart:
+   ```bash
+   pm2 save
+   ```
+
+4. To monitor the running processes:
+   ```bash
+   pm2 list
+   ```
+
+5. Access the application:
+   - Frontend: http://localhost:5001
+   - Backend API: http://localhost:5002
+
+### Backend
+1. Prepare static files:
+   ```bash
+   python manage.py collectstatic
+   ```
+2. Deploy using your preferred platform (e.g., Heroku, AWS, DigitalOcean).
+
+### Frontend
+1. Build the production files:
+   ```bash
+   npm run build
+   ```
+2. Deploy using your preferred platform (e.g., Netlify, Vercel, AWS).
+
+## Testing
+
+### Backend
+1. Run unit tests:
+   ```bash
+   python manage.py test
+   ```
+
+### Frontend
+1. Run unit tests:
+   ```bash
+   npm test
+   ```
+
+## Production Best Practices
+1. Use HTTPS for all API and frontend endpoints.
+2. Set up proper logging and monitoring.
+3. Regularly update dependencies and apply security patches.
+4. Use environment variables for sensitive data.
+5. Implement rate limiting and other security measures.
+
+# LAWFULLY_FLARE - Immigration Case Management System
+
 ## Overview
 
 The LAWFULLY_FLARE Immigration Case Management System is a comprehensive solution designed to streamline the management, processing, and tracking of immigration cases. Built with a modern tech stack, this application provides legal professionals, clients, and administrators with a robust platform to handle complex immigration workflows, document management, and case communications.
@@ -101,7 +255,7 @@ The application implements a robust logging system across all components:
 
 5. The application will be available at:
    - Frontend: http://localhost:3000
-   - Backend API: http://localhost:5000
+   - Backend API: http://localhost:5002
 
 ### Production Deployment
 Refer to the deployment documentation in `docs/deployment.md` for detailed instructions on setting up a production environment.

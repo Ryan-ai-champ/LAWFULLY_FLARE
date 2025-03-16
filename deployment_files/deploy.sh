@@ -99,7 +99,7 @@ build_frontend() {
     export REACT_APP_API_URL="https://staging-api.immigration-platform.com"
     export GENERATE_SOURCEMAP=true
   else
-    export REACT_APP_API_URL="http://localhost:5000"
+    export REACT_APP_API_URL="http://localhost:5001"
     export GENERATE_SOURCEMAP=true
   fi
   
