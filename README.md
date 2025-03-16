@@ -100,8 +100,8 @@ The application implements a robust logging system across all components:
    ```
 
 5. The application will be available at:
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost:5000
+   - Frontend: http://localhost:5002
+   - Backend API: http://localhost:5001
 
 ### Production Deployment
 Refer to the deployment documentation in `docs/deployment.md` for detailed instructions on setting up a production environment.
