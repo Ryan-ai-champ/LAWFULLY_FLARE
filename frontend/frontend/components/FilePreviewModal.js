@@ -6,6 +6,30 @@ import { FullscreenIcon, FullscreenExitIcon } from '@mui/icons-material';
 
 Modal.setAppElement('#root');
 
+const PagePreview = React.memo(({ pageNumber, zoomLevel, searchText, caseSensitive, wholeWord, useRegex }) => {
+  const textLayerRef = useRef(null);
+
+  return (
+    <Page 
+      pageNumber={pageNumber}
+      scale={zoomLevel}
+      loading="Loading page..."
+      onRenderTextLayerSuccess={() => {
+        // Text layer rendering logic
+      }}
+    >
+      {({ canvasLayer, textLayer }) => (
+        <>
+          {canvasLayer}
+          <div ref={textLayerRef}>
+            {textLayer}
+          </div>
+        </>
+      )}
+    </Page>
+  );
+});
+
 const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
   const [searchText, setSearchText] = useState('');
   const [matches, setMatches] = useState([]);
@@ -20,6 +44,32 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const modalRef = useRef();
+  const [annotations, setAnnotations] = useState([]);
+
+  const exportAnnotations = () => {
+    const annotationData = {
+      fileUrl,
+      timestamp: new Date().toISOString(),
+      totalPages: numPages,
+      annotations: matches.map(match => ({
+        page: match.page,
+        text: searchText,
+        matchIndex: match.matchIndex,
+        length: match.length,
+        timestamp: new Date().toISOString()
+      }))
+    };
+
+    const blob = new Blob([JSON.stringify(annotationData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `annotations_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const handleZoomIn = () => setZoomLevel((prev) => Math.min(prev + 0.1, 2));
   const handleZoomOut = () => setZoomLevel((prev) => Math.max(prev - 0.1, 0.5));
@@ -45,116 +95,53 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
       className={isFullScreen ? 'modal fullscreen' : 'modal'}
       overlayClassName={isFullScreen ? 'overlay fullscreen' : 'overlay'}
       ref={modalRef}
+      aria-modal="true"
+      role="dialog"
+      onAfterOpen={() => modalRef.current?.focus()}
     >
     >
       <div style={{ display: 'flex', height: '90vh' }}>
-        <div style={{ width: '200px', overflowY: 'auto', borderRight: '1px solid #ddd' }}>
-          {[...Array(numPages || 0)].map((_, index) => (
-            <div
-              key={index + 1}
-              onClick={() => handleThumbnailClick(index + 1)}
-              style={{
-                cursor: 'pointer',
-                padding: '8px',
-                backgroundColor: pageNumber === index + 1 ? '#e2e8f0' : 'transparent',
-              }}
-            >
-              <Document file={fileUrl} onLoadSuccess={onDocumentLoadSuccess}>
-                <Page
-                  pageNumber={index + 1}
-                  width={150}
-                  renderAnnotationLayer={false}
-                  renderTextLayer={false}
-                />
+        <div 
+          role="navigation"
+          aria-label="Page thumbnails"
+          style={{ width: '200px', overflowY: 'auto', borderRight: '1px solid #ddd' }}
+        >
+          {[...Array(numPages || 0)].map((_, index) => {
+            const isVisible = Math.abs(index + 1 - pageNumber) <= 2; // Only render nearby pages
+            return (
+              <div
+                key={index + 1}
+                onClick={() => handleThumbnailClick(index + 1)}
+                style={{
+                  cursor: 'pointer',
+                  padding: '8px',
+                  backgroundColor: pageNumber === index + 1 ? '#e2e8f0' : 'transparent',
+                }}
+              >
+                {isVisible && (
+                  <Document file={fileUrl} onLoadSuccess={onDocumentLoadSuccess}>
+                    <Page
+                      pageNumber={index + 1}
+                      width={150}
+                      renderAnnotationLayer={false}
+                      renderTextLayer={false}
+                    />
+                  </Document>
+                )}
               </Document>
             </div>
           ))}
         </div>
         <div className="preview-container" style={{ flex: 1, height: isFullScreen ? 'calc(100vh - 60px)' : '90vh' }}>
             <Document file={fileUrl} onLoadSuccess={onDocumentLoadSuccess}>
-              <Page 
-                pageNumber={pageNumber} 
-                scale={zoomLevel}
-                onRenderTextLayerSuccess={() => {
-                  if (textLayerRef.current && searchText) {
-                    const textLayer = textLayerRef.current;
-                    const textSpans = textLayer.querySelectorAll('.react-pdf__Page__textContent > span');
-                    const newMatches = [];
-                    
-                    textSpans.forEach((span, index) => {
-                      const flags = caseSensitive ? 'g' : 'gi';
-                      let pattern = searchText;
-                      let flags = caseSensitive ? 'g' : 'gi';
-                      
-                      if (wholeWord) {
-                        pattern = `\\\\b${searchText}\\\\b`;
-                      }
-
-                      if (useRegex) {
-                        try {
-                          new RegExp(pattern, flags); // Test if regex is valid
-                          setRegexError(null);
-                        } catch (error) {
-                          setRegexError('Invalid regex pattern');
-                          return;
-                        }
-                      } else {
-                        // Escape special regex characters if not using regex
-                        pattern = pattern.replace(/[.*+?^${}()|[\]\\\\]/g, '\\\\$&');
-                      }
-
-                      const matches = [...span.innerText.matchAll(new RegExp(pattern, flags))];
-                      matches.forEach(match => {
-                          page: pageNumber,
-                          spanIndex: index,
-                          matchIndex: match.index,
-                          length: match[0].length
-                        });
-                      });
-                    });
-                    
-                    // If this isn't the last page, search the next page
-                    if (pageNumber < numPages) {
-                      setPageNumber(pageNumber + 1);
-                      setMatches(prevMatches => [...prevMatches, ...newMatches]);
-                    } else {
-                      setMatches(newMatches);
-                      setCurrentMatch(0);
-                      if (newMatches.length > 0) {
-                        setPageNumber(newMatches[0].page);
-                      }
-                    }
-
-                    setMatches(newMatches);
-                    setCurrentMatch(0);
-
-                    // Highlight matches
-                    textSpans.forEach(span => span.style.backgroundColor = '');
-                    newMatches.forEach(match => {
-                      const span = textSpans[match.spanIndex];
-                      const textNode = span.childNodes[0];
-                      const range = document.createRange();
-                      range.setStart(textNode, match.matchIndex);
-                      range.setEnd(textNode, match.matchIndex + match.length);
-                      const highlight = document.createElement('span');
-                      highlight.style.backgroundColor = 'yellow';
-                      range.surroundContents(highlight);
-                    });
-                  }
-                }}
-              >
-                {({ canvasLayer, textLayer }) => (
-                  <>
-                    {canvasLayer}
-                    <div 
-                      ref={textLayerRef}
-                      style={{ position: 'absolute', top: 0, left: 0 }}
-                    >
-                      {textLayer}
-                    </div>
-                  </>
-                )}
-              </Page>
+              <PagePreview 
+                pageNumber={pageNumber}
+                zoomLevel={zoomLevel}
+                searchText={searchText}
+                caseSensitive={caseSensitive}
+                wholeWord={wholeWord}
+                useRegex={useRegex}
+              />
             </Document>
               <Page pageNumber={pageNumber} scale={zoomLevel} />
             </Document>
@@ -192,6 +179,9 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
                   Regex
                 </label>
                 <button
+                  aria-label="Next search result"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
                       setCurrentMatch(prev => {
                         const nextMatch = (prev + 1) % matches.length;
                         const match = matches[nextMatch];
@@ -214,7 +204,7 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
               </div>
               <div style={{ marginBottom: '8px' }}>
                 {searchText && (
-                  <span>
+                  <span aria-live="polite" aria-atomic="true">
                     {matches.length > 0 
                       ? `Match ${currentMatch + 1} of ${matches.length} (Page ${matches[currentMatch].page})`
                       : 'No matches found'}
@@ -227,6 +217,8 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
                   </span>
                 )}
               </div>
+              <button
+              </button>
               <button
                 style={{ margin: '0 4px' }}
               >
@@ -244,13 +236,33 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
               <button onClick={handleZoomOut}>Zoom Out</button>
               <button onClick={handleZoomReset}>Reset Zoom</button>
               <button onClick={handleZoomIn}>Zoom In</button>
+              <button 
+                onClick={exportAnnotations}
+                title="Export Annotations"
+                style={{ marginLeft: '8px' }}
+              >
+                Export Annotations
+              </button>
             </div>
-          </>
-        ) : (
           <img src={fileUrl} alt="Preview" style={{ maxWidth: '100%' }} />
         )}
       </div>
-      <button onClick={onRequestClose}>Close Preview</button>
+      <button 
+        onClick={onRequestClose}
+        aria-label="Close file preview"
+        style={{
+          backgroundColor: '#f0f0f0',
+          color: '#333',
+          padding: '8px 16px',
+          border: '1px solid #ccc',
+          borderRadius: '4px',
+          ':hover': {
+            backgroundColor: '#e0e0e0'
+          }
+        }}
+      >
+        Close Preview
+      </button>
     </Modal>
   );
 };
