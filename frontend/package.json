@@ -18,11 +18,29 @@
     "yarnpkg": "./bin/yarn.js"
   },
   "scripts": {
-    "preinstall": ":; (node ./preinstall.js > /dev/null 2>&1 || true)"
+    "preinstall": ":; (node ./preinstall.js > /dev/null 2>&1 || true)",
+    "start": "react-scripts start"
   },
   "config": {
     "commitizen": {
       "path": "./node_modules/cz-conventional-changelog"
     }
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-scripts": "^3.4.4"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
   }
 }
