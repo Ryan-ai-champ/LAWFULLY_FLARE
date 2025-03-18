@@ -47,4 +47,4 @@
                         searchText
                       ].slice(-10));
                     }
-                  }}
+                  }}</div>

@@ -98,10 +98,10 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
       aria-modal="true"
       role="dialog"
       onAfterOpen={() => modalRef.current?.focus()}
+    ></Modal>
     >
-    >
-      <div style={{ display: 'flex', height: '90vh' }}>
-        <div 
+      <><div style={{ display: 'flex', height: '90vh' }}>
+        <div
           role="navigation"
           aria-label="Page thumbnails"
           style={{ width: '200px', overflowY: 'auto', borderRight: '1px solid #ddd' }}
@@ -124,125 +124,109 @@ const FilePreviewModal = ({ isOpen, onRequestClose, fileUrl, fileType }) => {
                       pageNumber={index + 1}
                       width={150}
                       renderAnnotationLayer={false}
-                      renderTextLayer={false}
-                    />
+                      renderTextLayer={false} />
                   </Document>
                 )}
-              </Document>
-            </div>
-          ))}
+              </div>);
+          })}
         </div>
-        <div className="preview-container" style={{ flex: 1, height: isFullScreen ? 'calc(100vh - 60px)' : '90vh' }}>
-            <Document file={fileUrl} onLoadSuccess={onDocumentLoadSuccess}>
-              <PagePreview 
-                pageNumber={pageNumber}
-                zoomLevel={zoomLevel}
-                searchText={searchText}
-                caseSensitive={caseSensitive}
-                wholeWord={wholeWord}
-                useRegex={useRegex}
-              />
-            </Document>
-              <Page pageNumber={pageNumber} scale={zoomLevel} />
-            </Document>
-            <div className="pdf-controls">
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                <input
-                  type="text"
-                  placeholder="Search..."
-                  value={searchText}
-                  onChange={(e) => setSearchText(e.target.value)}
-                  style={{ padding: '4px', flex: 1 }}
-                />
-                <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <input
-                    type="checkbox"
-                    checked={caseSensitive}
-                    onChange={(e) => setCaseSensitive(e.target.checked)}
-                  />
-                  Case Sensitive
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <input
-                    type="checkbox"
-                    checked={wholeWord}
-                    onChange={(e) => setWholeWord(e.target.checked)}
-                  />
-                  Whole Word
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <input
-                    type="checkbox"
-                    checked={useRegex}
-                    onChange={(e) => setUseRegex(e.target.checked)}
-                  />
-                  Regex
-                </label>
-                <button
-                  aria-label="Next search result"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      setCurrentMatch(prev => {
-                        const nextMatch = (prev + 1) % matches.length;
-                        const match = matches[nextMatch];
-                        if (match.page !== pageNumber) {
-                          setPageNumber(match.page);
-                        }
-                        return nextMatch;
-                      });
-                      const match = matches[currentMatch];
-                      const textSpans = textLayerRef.current?.querySelectorAll('.react-pdf__Page__textContent > span');
-                      if (textSpans && textSpans[match.spanIndex]) {
-                        textSpans[match.spanIndex].scrollIntoView({ block: 'center' });
-                      }
+      </div><div className="preview-container" style={{ flex: 1, height: isFullScreen ? 'calc(100vh - 60px)' : '90vh' }}>
+          <Document file={fileUrl} onLoadSuccess={onDocumentLoadSuccess}>
+            <PagePreview
+              pageNumber={pageNumber}
+              zoomLevel={zoomLevel}
+              searchText={searchText}
+              caseSensitive={caseSensitive}
+              wholeWord={wholeWord}
+              useRegex={useRegex} />
+          </Document>
+          <Page pageNumber={pageNumber} scale={zoomLevel} />
+        </div><div className="pdf-controls">
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+            <input
+              type="text"
+              placeholder="Search..."
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              style={{ padding: '4px', flex: 1 }} />
+            <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <input
+                type="checkbox"
+                checked={caseSensitive}
+                onChange={(e) => setCaseSensitive(e.target.checked)} />
+              Case Sensitive
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <input
+                type="checkbox"
+                checked={wholeWord}
+                onChange={(e) => setWholeWord(e.target.checked)} />
+              Whole Word
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <input
+                type="checkbox"
+                checked={useRegex}
+                onChange={(e) => setUseRegex(e.target.checked)} />
+              Regex
+            </label>
+            <button
+              aria-label="Next search result"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  setCurrentMatch(prev => {
+                    const nextMatch = (prev + 1) % matches.length;
+                    const match = matches[nextMatch];
+                    if (match.page !== pageNumber) {
+                      setPageNumber(match.page);
                     }
-                  }}
-                  disabled={!searchText || matches.length === 0}
-                >
-                  Next
-                </button>
-              </div>
-              <div style={{ marginBottom: '8px' }}>
-                {searchText && (
-                  <span aria-live="polite" aria-atomic="true">
-                    {matches.length > 0 
-                      ? `Match ${currentMatch + 1} of ${matches.length} (Page ${matches[currentMatch].page})`
-                      : 'No matches found'}
-                      : 'No matches found'}
-                  </span>
-                )}
-                {regexError && (
-                  <span style={{ color: 'red', marginLeft: '8px' }}>
-                    {regexError}
-                  </span>
-                )}
-              </div>
-              <button
-              </button>
-              <button
-                style={{ margin: '0 4px' }}
-              >
-                {isFullScreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
-              </button>
-              <button onClick={goToPrevPage} disabled={pageNumber <= 1}>
-                Previous
-              </button>
-              <p>
-                Page {pageNumber} of {numPages}
-              </p>
-              <button onClick={goToNextPage} disabled={pageNumber >= numPages}>
-                Next
-              </button>
-              <button onClick={handleZoomOut}>Zoom Out</button>
-              <button onClick={handleZoomReset}>Reset Zoom</button>
-              <button onClick={handleZoomIn}>Zoom In</button>
-              <button 
-                onClick={exportAnnotations}
-                title="Export Annotations"
-                style={{ marginLeft: '8px' }}
-              >
-                Export Annotations
-              </button>
+                    return nextMatch;
+                  });
+                  const match = matches[currentMatch];
+                  const textSpans = textLayerRef.current?.querySelectorAll('.react-pdf__Page__textContent > span');
+                  if (textSpans && textSpans[match.spanIndex]) {
+                    textSpans[match.spanIndex].scrollIntoView({ block: 'center' });
+                  }
+                }
+              } }
+              disabled={!searchText || matches.length === 0}
+            >
+              Next
+            </button>
+          </div>
+          <div style={{ marginBottom: '8px' }}>
+            {searchText && (
+              <span aria-live="polite" aria-atomic="true">
+                {matches.length > 0
+                  ? `Match ${currentMatch + 1} of ${matches.length} (Page ${matches[currentMatch].page})`
+                  : 'No matches found'}
+                : 'No matches found'
+              </span>
+            )}
+            {regexError && (
+              <span style={{ color: 'red', marginLeft: '8px' }}>
+                {regexError}
+              </span>
+            )}
+          </div>
+          <button />
+        </div><button
+          style={{ margin: '0 4px' }}
+        >
+          {isFullScreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
+        </button><button onClick={goToPrevPage} disabled={pageNumber <= 1}>
+          Previous
+        </button><p>
+          Page {pageNumber} of {numPages}
+        </p><button onClick={goToNextPage} disabled={pageNumber >= numPages}>
+          Next
+        </button><button onClick={handleZoomOut}>Zoom Out</button><button onClick={handleZoomReset}>Reset Zoom</button><button onClick={handleZoomIn}>Zoom In</button><button
+          onClick={exportAnnotations}
+          title="Export Annotations"
+          style={{ marginLeft: '8px' }}
+        >
+          Export Annotations
+        </button></>
             </div>
           <img src={fileUrl} alt="Preview" style={{ maxWidth: '100%' }} />
         )}
