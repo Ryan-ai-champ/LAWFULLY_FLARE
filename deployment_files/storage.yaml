@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'LAWFULLY_FLARE - Storage Stack with RDS and S3 resources (DEMO MODE)'
+
+Parameters:
+  Environment:
+    Description: Environment name, e.g. dev, test, prod
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+  
+  ProjectName:
+    Description: Name of the project
+    Type: String
+    Default: lawfully-flare-demo
+  
+  NetworkStackName:
+    Description: Name of the network stack to import values from
+    Type: String
+    Default: lawfully-flare-network
+  
+  DBName:
+    Description: Name of the database
+    Type: String
+    Default: lawfullyflaredb
+    MinLength: 1
+    MaxLength: 64
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters
+  
+  DBUsername:
+    Description: Username for the database
+    Type: String
+    Default: admin
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters
+  
+  DBPassword:
+    Description: Password for the database
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: Must contain only alphanumeric characters
+
+  DBInstanceClass:
+    Description: Database instance class (Demo - using smallest instance)
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+
+Resources:
+  # Security Groups
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS instance (Demo)
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp:
+            Fn::ImportValue: !Sub "${NetworkStackName}-VpcCidrBlock"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-sg"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DemoEnvironment
+          Value: 'true'
+        - Key: Demo
+          Value: 'Not for production use'
+
+  # RDS Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS instance (Demo)
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnet2Id"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-subnet-group"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DemoEnvironment
+          Value: 'true'
+        - Key: Demo
+          Value: 'Not for production use'
+
+  # RDS Instance
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      Engine: mysql
+      EngineVersion: '8.0'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 5
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+      MultiAZ: false
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-rds"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DemoEnvironment
+          Value: 'true'
+        - Key: Demo
+          Value: 'Not for production use'
+
+  # S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Environment}-assets-${AWS::AccountId}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToInfrequentAccess
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-assets"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DemoEnvironment
+          Value: 'true'
+        - Key: Demo
+          Value: 'Not for production use'
+
+  # S3 Bucket Policy
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub "arn:aws:s3:::${S3Bucket}"
+              - !Sub "arn:aws:s3:::${S3Bucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  RDSEndpoint:
+    Description: RDS endpoint address
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSEndpoint"
+  
+  RDSPort:
+    Description: RDS endpoint port
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSPort"
+  
+  DBName:
+    Description: Database name
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${AWS::StackName}-DBName"
+  
+  DBUsername:
+    Description: Database master username
+    Value: !Ref DBUsername
+    Export:
+      Name: !Sub "${AWS::StackName}-DBUsername"
+  
+  DBSecurityGroupId:
+    Description: Security group ID for the database
+    Value: !GetAtt DBSecurityGroup.GroupId
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSecurityGroupId"
+  
+  S3BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref S3Bucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3BucketName"
+  
+  S3BucketArn:
+    Description: ARN of the S3 bucket
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-S3BucketArn"

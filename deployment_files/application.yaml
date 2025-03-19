@@ -1,0 +1,410 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: LAWFULLY_FLARE Application Infrastructure - EC2, Load Balancer, and Auto Scaling
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Deployment environment
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  
+  NetworkStackName:
+    Type: String
+    Description: Name of the network stack that exports VPC and subnet variables
+    Default: lawfully-flare-network
+  
+  StorageStackName:
+    Type: String
+    Description: Name of the storage stack that exports RDS and S3 variables
+    Default: lawfully-flare-storage
+  
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - t3.medium
+  
+  AMIId:
+    Type: AWS::EC2::Image::Id
+    Description: Amazon Machine Image ID for EC2 instances
+  
+  MinInstances:
+    Type: Number
+    Description: Minimum number of instances in the auto scaling group
+    Default: 1
+  
+  MaxInstances:
+    Type: Number
+    Description: Maximum number of instances in the auto scaling group
+    Default: 3
+  
+  DesiredCapacity:
+    Type: Number
+    Description: Desired number of instances in the auto scaling group
+    Default: 2
+
+Resources:
+  # Security Groups
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the load balancer
+      VpcId: 
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-LoadBalancerSG
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the application servers
+      VpcId: 
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5001
+          ToPort: 5001
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 5002
+          ToPort: 5002
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ApplicationSG
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for EC2 Instances
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-EC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::ImportValue: !Sub ${StorageStackName}-S3BucketArn
+                  - !Join ['', [Fn::ImportValue: !Sub ${StorageStackName}-S3BucketArn, '/*']]
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # Launch Template
+  ApplicationLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-LaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: !Ref AMIId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref ApplicationSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            echo "Starting user data script execution"
+
+            # Install required packages
+            yum update -y
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to update packages"
+                exit 1
+            fi
+            
+            yum install -y docker git amazon-cloudwatch-agent
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to install required packages"
+                exit 1
+            fi
+
+            # Start and enable services
+            systemctl start docker
+            systemctl enable docker
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to start docker service"
+                exit 1
+            fi
+            echo "Successfully started Docker service"
+
+            # Create application directory
+            mkdir -p /app
+            cd /app
+
+            # Clone application repository
+            echo "Cloning application repository"
+            git clone https://github.com/yourusername/LAWFULLY_FLARE.git .
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to clone application repository"
+                exit 1
+            fi
+
+            # Create environment file
+            echo "Setting up environment variables"
+            cat > /app/.env << EOL
+            RDS_HOSTNAME=${ImportValue:${StorageStackName}-RDSEndpoint}
+            RDS_PORT=3306
+            RDS_DB_NAME=${ImportValue:${StorageStackName}-DBName}
+            RDS_USERNAME=${ImportValue:${StorageStackName}-DBUsername}
+            RDS_PASSWORD=${ImportValue:${StorageStackName}-DBPassword}
+            S3_BUCKET=${ImportValue:${StorageStackName}-S3BucketName}
+            EOL
+
+            # Start application
+            echo "Starting application with Docker Compose"
+            cd /app
+            docker-compose -f deployment_files/docker-compose.yml up -d
+
+            # Final status check
+            if [ $? -eq 0 ]; then
+                echo "Successfully completed user data script"
+                
+                # Configure CloudWatch agent
+                cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << EOL
+                {
+                    "logs": {
+                        "logs_collected": {
+                            "files": {
+                                "collect_list": [
+                                    {
+                                        "file_path": "/var/log/user-data.log",
+                                        "log_group_name": "${AWS::StackName}-logs",
+                                        "log_stream_name": "{instance_id}-user-data"
+                                    },
+                                    {
+                                        "file_path": "/app/logs/*.log",
+                                        "log_group_name": "${AWS::StackName}-app-logs",
+                                        "log_stream_name": "{instance_id}-app"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+                EOL
+                
+                # Start CloudWatch agent
+                systemctl start amazon-cloudwatch-agent
+                systemctl enable amazon-cloudwatch-agent
+            else
+                echo "Failed to complete user data script"
+                exit 1
+            fi
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-Instance
+              - Key: Environment
+                Value: !Ref Environment
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-ALB
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PublicSubnet1
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ALB
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Target Groups
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+      Port: 5001
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPort: 5001
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200-299
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-FrontendTG
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+      Port: 5002
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPort: 5002
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200-299
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-BackendTG
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Listeners
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  ApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /api/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  # Auto Scaling Group
+  ApplicationAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-ASG
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ApplicationLaunchTemplate
+        Version: !GetAtt ApplicationLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinInstances
+      MaxSize: !Ref MaxInstances
+      DesiredCapacity: !Ref DesiredCapacity
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet1
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref FrontendTargetGroup
+        - !Ref BackendTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+
+  # Scaling Policies
+  CPUScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ApplicationAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 75.0
+
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerDNS
+
+  ApplicationSecurityGroup:
+    Description: Security group ID for the application
+    Value: !Ref ApplicationSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ApplicationSG
+
+  LoadBalancerSecurityGroup:
+    Description: Security group ID for the load balancer
+    Value: !Ref LoadBalancerSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerSG
+
+  AutoScalingGroupName:
+    Description: Name of the auto scaling group
+    Value: !Ref ApplicationAutoScalingGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ASGName
+
